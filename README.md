@@ -17,6 +17,8 @@
 
 A terminal-based (TUI) global keyboard and mouse automation tool for first-person shooters, built with Hypixel Zombies and Black-Ops–style gameplay in mind. It listens for a global execution hotkey and, once activated, runs a configurable macro loop that switches weapons according to your bindings and autoclicks the right mouse button at a precise rhythm. Written in Rust with `ratatui`, `crossterm`, and `rdev` for global input capture and injection, it keeps working even when your game is in the foreground.
 
+<img width="1243" height="732" alt="IMAGE" src="https://github.com/user-attachments/assets/5de1f6f1-6cb6-4c54-9f03-11f31b20333e" />
+
 ---
 
 ## Features
