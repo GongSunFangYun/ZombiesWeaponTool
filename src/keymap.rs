@@ -1,11 +1,18 @@
-//! 绑定名（crossterm 捕获产生的可读名称）↔ rdev 全局输入 的映射与模拟。
+//! Binding-name ↔ rdev mapping and simulation.
+//!
+//! Translates between the human-readable binding names produced by crossterm capture
+//! (e.g. `2`, `LALT`, `MB2`) and `rdev`'s global input types, and simulates a tap of either.
+//!
+//! These names are stored in the config file and matched against real input, so they are
+//! intentionally **not** localized (see `lang.rs`).
 
 use rdev::{Button, EventType, Key};
 use std::thread;
 use std::time::Duration;
 
-/// 模拟敲击按键/鼠标按钮时，按下与释放之间的间隔。
-/// 足够让 SendInput 注册一次点击，又不显著拖慢间隔节奏（40ms 会叠加进射击/切枪周期）。
+/// Interval between a simulated key press and its release.
+/// Long enough for `SendInput` to register a single click, but not long enough to noticeably
+/// slow the macro rhythm (a 40 ms delay would stack up inside the switch/shoot cycle).
 const TAP_DELAY: Duration = Duration::from_millis(8);
 
 const NUM_KEYS: [Key; 10] = [
@@ -65,7 +72,7 @@ const F_KEYS: [Key; 12] = [
     Key::F12,
 ];
 
-/// 把单个键名解析为 rdev::Key。
+/// Parse a single key name into an `rdev::Key`.
 fn main_key(name: &str) -> Option<Key> {
     let n = name.to_ascii_uppercase();
     if n.len() == 1 {
@@ -119,15 +126,16 @@ fn main_key(name: &str) -> Option<Key> {
     }
 }
 
-/// 绑定名的「主键」，用于全局监听时匹配按键事件（忽略 CTRL/ALT/WIN 组合前缀）。
+/// The "main key" of a binding name, used by the global listener to match key events
+/// (ignores any CTRL/ALT/WIN modifier prefix).
 pub fn binding_main_key(name: &str) -> Option<Key> {
     name.split('+')
         .last()
         .and_then(main_key)
 }
 
-/// rdev 按键 → 绑定名（捕获模式把全局按下的键转成可存配置的名称）。
-/// Esc 返回 None（由上层处理为取消捕获）。
+/// `rdev` key → binding name (capture mode turns a globally-pressed key into a name storable
+/// in the config). Esc returns `None` (the caller treats it as cancel-capture).
 pub fn rdev_key_name(k: Key) -> Option<String> {
     use rdev::Key as K;
     let s = match k {
@@ -216,7 +224,7 @@ pub fn rdev_key_name(k: Key) -> Option<String> {
     Some(s.to_string())
 }
 
-/// 解析绑定名成 (修饰键列表, 主键)。
+/// Parse a binding name into `(modifier list, main key)`.
 fn parse_chord(name: &str) -> Option<(Vec<Key>, Key)> {
     let mut mods = Vec::new();
     let mut main = None;
@@ -231,7 +239,7 @@ fn parse_chord(name: &str) -> Option<(Vec<Key>, Key)> {
     Some((mods, main?))
 }
 
-/// 把绑定名解析为鼠标按钮。
+/// Resolve a binding name to a mouse button.
 pub fn binding_to_button(name: &str) -> Option<Button> {
     match name {
         "MB1" => Some(Button::Left),
@@ -241,7 +249,8 @@ pub fn binding_to_button(name: &str) -> Option<Button> {
     }
 }
 
-// FIX: 原先忽略返回值；现在在 debug 模式下打印错误，方便排查 rdev 驱动问题。
+// FIX: the return value used to be ignored; now we log errors in debug builds so that
+// rdev driver issues are easier to diagnose.
 fn simulate_press(et: &EventType) -> bool {
     match rdev::simulate(et) {
         Ok(()) => true,
@@ -253,22 +262,25 @@ fn simulate_press(et: &EventType) -> bool {
     }
 }
 
-/// 模拟敲击一次绑定（鼠标按钮或按键，支持 CTRL+/ALT+/WIN+ 组合）。
+/// Simulate one tap of a binding (mouse button or key, supporting CTRL+/ALT+/WIN+ combos).
 ///
-/// # 修饰键泄漏修复
+/// # Modifier-leak fix
 ///
-/// 原实现在以下情况下会导致修饰键（CTRL/ALT/WIN）永久卡住：
-/// - `simulate_press` 失败后提前 return，已按下的修饰键未被释放。
+/// The original implementation could leave a modifier (CTRL/ALT/WIN) permanently "stuck" in
+/// one case: if `simulate_press` failed it returned early *before* releasing the modifier it
+/// had already pressed.
 ///
-/// 新实现采用"逐个按下、失败即回滚"的策略：
-/// 1. 每按下一个修饰键，立即记录到 `pressed_mods`；
-/// 2. 任意步骤失败时，先把 `pressed_mods` 里已按下的键全部**逆序释放**，再 return false；
-/// 3. 主键按下后，无论成功与否，修饰键都保证被释放。
+/// The new implementation uses a "press one-by-one, roll back on failure" strategy:
+/// 1. each modifier that succeeds is recorded into `pressed_mods` immediately;
+/// 2. if any step fails, all recorded modifiers are released **in reverse order** before
+///    returning `false`;
+/// 3. after the main key is pressed, the modifiers are guaranteed to be released no matter
+///    the result.
 ///
-/// 这样即使 rdev::simulate 中途出错，系统键盘状态仍能恢复干净，
-/// 不会干扰玩家在游戏窗口的后续原生输入。
+/// This keeps the OS keyboard state clean even if `rdev::simulate` fails mid-way, so it
+/// doesn't disturb the player's later native input in the game window.
 pub fn tap_binding(name: &str) -> bool {
-    // --- 鼠标按钮路径（无修饰键，逻辑不变）---
+    // --- Mouse-button path (no modifiers; logic unchanged) ---
     if let Some(btn) = binding_to_button(name) {
         let ok1 = simulate_press(&EventType::ButtonPress(btn));
         thread::sleep(TAP_DELAY);
@@ -276,18 +288,19 @@ pub fn tap_binding(name: &str) -> bool {
         return ok1 && ok2;
     }
 
-    // --- 键盘路径 ---
+    // --- Keyboard path ---
     let Some((mods, main)) = parse_chord(name) else {
         return false;
     };
 
-    // 逐个按下修饰键；任意失败时回滚已按下的修饰键并中止。
+    // Press each modifier one at a time; on any failure, roll back the ones already pressed.
     let mut pressed_mods: Vec<Key> = Vec::with_capacity(mods.len());
     for m in &mods {
         if simulate_press(&EventType::KeyPress(*m)) {
             pressed_mods.push(*m);
         } else {
-            // 回滚：逆序释放已按下的修饰键，保证系统键盘状态干净。
+            // Roll back: release the already-pressed modifiers in reverse order so the OS
+            // keyboard state stays clean.
             for pm in pressed_mods.iter().rev() {
                 simulate_press(&EventType::KeyRelease(*pm));
             }
@@ -295,13 +308,14 @@ pub fn tap_binding(name: &str) -> bool {
         }
     }
 
-    // 主键按下 → 等待 TAP_DELAY → 主键释放。
-    // 无论 main_ok 结果如何，修饰键都必须在下方释放。
+    // Press the main key → wait TAP_DELAY → release the main key. Whatever `main_ok` is,
+    // the modifiers must still be released below.
     let main_ok = simulate_press(&EventType::KeyPress(main));
     thread::sleep(TAP_DELAY);
     simulate_press(&EventType::KeyRelease(main));
 
-    // 修饰键逆序释放（保证与按下顺序镜像对称，符合 OS 期望的嵌套 press/release）。
+    // Release the modifiers in reverse order (mirrors the press order — the nesting the OS
+    // expects for press/release).
     for m in pressed_mods.iter().rev() {
         simulate_press(&EventType::KeyRelease(*m));
     }
@@ -365,16 +379,16 @@ mod tests {
         assert_eq!(rdev_key_name(Key::Escape), None);
     }
 
-    /// 验证无效绑定名不会触发任何模拟（不 panic，返回 false）。
+    /// An invalid binding name must not trigger any simulation (no panic, returns false).
     #[test]
     fn tap_binding_invalid_name_returns_false() {
-        // 不会真正调用 rdev::simulate（单元测试无系统钩子），
-        // 但至少不应 panic，且返回 false。
+        // This won't actually call rdev::simulate (unit tests have no system hook), but it
+        // must at least not panic and must return false.
         let result = tap_binding("INVALID_KEY_NAME_XYZ");
         assert!(!result);
     }
 
-    /// 验证空绑定名安全处理。
+    /// An empty binding name is handled safely.
     #[test]
     fn tap_binding_empty_returns_false() {
         let result = tap_binding("");

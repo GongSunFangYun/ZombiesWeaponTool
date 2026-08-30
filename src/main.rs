@@ -1,22 +1,25 @@
-//! ZombiesWeaponTool —— 基于 ratatui/crossterm 的终端 TUI。
+//! ZombiesWeaponTool — a `ratatui`/`crossterm` terminal TUI.
 //!
-//! 一个为「僵尸模式 / BO 类」第一人称射击游戏辅助的**全局键鼠宏工具**：
-//! 监听全局执行热键，按配置循环模拟「自动切枪 + 右键连点」的组合操作序列，
-//! 支持三武器槽、执行顺序集合、长按/切换模式、乱序、时间抖动、速切配置路由、
-//! 配置热读取/热保存与会话恢复。
+//! A **global keyboard/mouse macro tool** for Zombies / Black-Ops-style first-person shooters:
+//! it listens for a global execution hotkey and, per the config, cycles through a combined
+//! "auto weapon-switch + right-click autoclick" sequence. Supports three weapon slots, an
+//! execution order set, hold/toggle modes, random ordering, timing jitter, a quick-switch
+//! config router, config hot-read/hot-save, and session restore.
 //!
-//! ## 模块职责
-//! - [`config`]：配置结构体、JSON 读写与校验；
-//! - [`engine`]：rdev 全局监听 + 模拟输入执行循环；
-//! - [`keymap`]：绑定名（可读字符串）↔ rdev 键/鼠标 的映射与模拟；
-//! - [`router`]：`zwtcfg_router.yaml` 轻量解析 + 无效条目标记；
-//! - [`session`]：会话状态（上次配置/路由）持久化；
-//! - [`lang`]：中/英文国际化。
+//! ## Module responsibilities
+//! - [`config`]: the config struct, JSON read/write, and validation;
+//! - [`engine`]: `rdev` global listening + the simulated-input execution loop;
+//! - [`keymap`]: mapping & simulation between readable binding names and `rdev` keys/mouse;
+//! - [`router`]: lightweight `zwtcfg_router.yaml` parsing + invalid-entry markers;
+//! - [`session`]: session-state persistence (last config/router);
+//! - [`watcher`]: background config-file watcher daemon thread;
+//! - [`lang`]: Chinese/English internationalization.
 //!
-//! ## 语言
-//! 默认**英文**；可在「操作」行的 `Switch Language` / `语言切换` 项切换为中文，
-//! 选择持久化到会话文件 `.zwt`，下次启动自动恢复。也支持 `--lang zh|en` /
-//! `ZWT_LANG=zh|en` 显式覆盖（见 [`lang::init`]、[`lang::Lang::toggle`]）。
+//! ## Language
+//! Defaults to **English**; switch to Chinese via the `Switch Language` / `语言切换` entry on
+//! the Operations row, persisted to the session file `.zwt` and restored on next launch. You
+//! can also force a language with `--lang zh|en` / `ZWT_LANG=zh|en` (see [`lang::init`],
+//! [`lang::Lang::toggle`]).
 
 use std::{fs, io};
 use std::path::{Path, PathBuf};
@@ -56,7 +59,8 @@ use engine::{Engine, EngineMsg};
 use lang::{tr, Lang};
 use watcher::WatchedPath;
 
-/// 标题 art：ZombiesWeaponTool 完整一体 ASCII 字符画，使用 raw string 避免反斜杠转义问题。
+/// Title art: a single-piece ASCII drawing of `ZombiesWeaponTool`, written as a raw string
+/// so backslashes don't need escaping.
 const BANNER: [&str; 6] = [
     r#"  _____               _     _         __        __                         _____           _ "#,
     r#" |__  /___  _ __ ___ | |__ (_) ___  __\ \      / /__  __ _ _ __   ___  _ _|_   _|__   ___ | |"#,
@@ -66,10 +70,10 @@ const BANNER: [&str; 6] = [
     r#"                                                          |_|                                "#,
 ];
 
-/// GitHub 开源仓库地址：显示在标题横幅底行。
+/// Open-source GitHub repository URL, shown on the banner's bottom line.
 const TOP_BAR: &str = "© GongSunFangYun | https://github.com/GongSunFangYun/ZombiesWeaponTool";
 
-/// 字段总数：5 绑定 + 1 顺序 + 1 方式 + 1 开关 + 4 数字 + 4 动作
+/// Total field count: 5 bindings + 1 order + 1 mode + 1 toggle + 4 numbers + 4 actions.
 const TOTAL_FIELDS: usize = 16;
 
 const F_WEAPON1: usize = 0;
@@ -89,7 +93,8 @@ const A_LOAD: usize = 13;
 const A_ROUTER: usize = 14;
 const A_LANG: usize = 15;
 
-/// 每一行的字段索引。绑定2行（武器槽一行/热键一行）/ 顺序1行 / 时间2行 / 动作1行。
+/// Field indices per row: two binding rows (weapon slots / hotkeys), one order row, two
+/// timing rows, one actions row.
 const ROWS: [&[usize]; 6] = [
     &[F_WEAPON1, F_WEAPON2, F_WEAPON3],
     &[F_EXEC_KEY, F_ROUTER],
@@ -110,13 +115,13 @@ enum FieldKind {
 
 #[derive(Clone, PartialEq)]
 enum Mode {
-    /// 正常导航
+    /// Normal navigation.
     Normal,
-    /// 按键捕获中（绑定字段）
+    /// Capturing a key for a binding field.
     Capture { field: usize },
-    /// 数字编辑中（带输入缓冲）
+    /// Editing a number (with an input buffer).
     Edit { field: usize, buf: String },
-    /// 执行顺序编辑中（只允许 ABCD 各一次）
+    /// Editing the execution-order set (A/B/C, each at most once).
     OrderEdit { field: usize, buf: String },
 }
 
@@ -141,8 +146,9 @@ enum DialogKind {
     Router,
 }
 
-/// 路由条目：配置路径 + 逐条校验结果。
-/// 无效条目（文件不存在 / JSON 语法或规范错误）在状态行标红，速切时跳过。
+/// A router entry: the config path plus its per-entry validation result.
+/// Invalid entries (missing file / JSON syntax or spec error) are shown in red on the status
+/// line and are skipped during quick-switching.
 struct RouterEntry {
     path: PathBuf,
     valid: bool,
@@ -151,25 +157,29 @@ struct RouterEntry {
 
 struct App {
     cfg: Config,
-    /// 供引擎线程读取的共享配置副本
+    /// Shared config copy read by the engine thread.
     shared: Arc<Mutex<Config>>,
     engine: Arc<Engine>,
     msg_rx: mpsc::Receiver<EngineMsg>,
-    /// 是否处于捕获/编辑模式（共享给全局监听线程，避免误触引擎）
+    /// Whether we're in capture/edit mode (shared with the global listener so it doesn't
+    /// accidentally drive the engine).
     interacting: Arc<AtomicBool>,
-    /// 当前配置来源文件（用于导出默认名、热保存写入目标、热读取监控对象）
+    /// The current config source file (used for export default name, hot-save target, and the
+    /// hot-read watch subject).
     config_source: Option<PathBuf>,
-    /// 当前配置源文件的修改时间（热读取：对比外部修改并自动重新加载）
+    /// The config source's modification time (hot-read: compare against external edits and
+    /// auto-reload).
     config_mtime: Option<SystemTime>,
-    /// 监听守护线程共享的「当前被监听路径」；`config_source` 变化时同步更新（见 note_config_source）
+    /// The currently-watched path shared with the watcher daemon thread; kept in sync with
+    /// `config_source` (see `note_config_source`).
     watched_path: WatchedPath,
-    /// 已载入路由 yaml 的路径（供会话持久化）
+    /// Loaded router YAML path (for session persistence).
     router_path: Option<PathBuf>,
-    /// 会话状态文件路径（默认 ~/.zwt，测试注入临时路径）
+    /// Session-state file path (default `~/.zwt`; tests inject a temp path).
     session_path: PathBuf,
-    /// 速切路由：载入 zwtcfg_router.yaml 后解析出的配置条目（含校验结果）
+    /// Quick-switch router: entries parsed from `zwtcfg_router.yaml` (with validation results).
     router_files: Vec<RouterEntry>,
-    /// 当前路由位置（按列表顺序循环）
+    /// Current router position (cycles the list in order).
     router_index: usize,
     focus: usize,
     mode: Mode,
@@ -180,7 +190,8 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        // 显式运行时语言覆盖（--lang / ZWT_LANG）；有则优先，会话恢复不再改语言
+        // Explicit runtime language override (--lang / ZWT_LANG); if present it wins and
+        // session restore won't change the language.
         let lang_override = lang::init();
         let shared = Arc::new(Mutex::new(Config::default()));
         let engine = Arc::new(Engine::new(shared.clone()));
@@ -188,7 +199,8 @@ impl App {
         let watched_path: WatchedPath = Arc::new(Mutex::new(None));
         let (tx, msg_rx) = mpsc::channel();
         let _listener = engine::start_listener(engine.clone(), interacting.clone(), tx.clone());
-        // 配置监听守护线程：发现配置文件被外部改写即通知主线程热重载（句柄丢弃 → daemon）
+        // Config watcher daemon thread: notifies the main thread to hot-reload when the config
+        // file is rewritten externally (handle discarded → daemon).
         let _watcher = watcher::start_watcher(watched_path.clone(), tx);
         let mut app = App {
             cfg: Config::default(),
@@ -208,10 +220,12 @@ impl App {
             status: None,
             should_quit: false,
         };
-        // 会话恢复：应用持久化语言 + 重载上次路由表并应用上次使用的配置；无状态/损坏则走默认流程
+        // Session restore: apply the persisted language + reload the last router table and
+        // apply the last-used config; with no state / corrupted state, fall through to defaults.
         app.restore_session(lang_override);
-        // 没有加载/恢复文案时，给出初始操作提示（用最终确定后的语言渲染，避免语言被
-        // 会话覆盖后首帧提示仍是旧语言）
+        // If no load/restore message was produced, show the initial operation hint. It's
+        // rendered in the *final* language, so a language override from the session doesn't
+        // leave the first frame showing the old language.
         if app.status.is_none() {
             app.status = Some(StatusMsg {
                 text: tr(
@@ -222,25 +236,27 @@ impl App {
                 kind: MsgKind::Info,
             });
         }
-        // 记录当前配置源 mtime（供热读取对比），并把配置同步给引擎线程
+        // Record the config source's mtime (for hot-read comparison) and sync it to the engine.
         app.touch_config_mtime();
-        // 把当前配置源同步给监听线程（此时可能已由会话恢复设置了路径）
+        // Publish the current config source to the watcher thread (it may already be set by
+        // session restore).
         app.note_config_source();
         *app.shared.lock().unwrap() = app.cfg.clone();
         app
     }
 
-    /// 启动会话恢复：读会话状态文件，重载上次路由表并应用上次使用的配置。
-    /// 无状态/损坏 → 走默认配置流程；记录的文件被删 → 回退链（路由第一有效 → zwtcfg.json）。
+    /// Start session restore: read the session state file, reload the last router table, and
+    /// apply the last-used config. With no state / corrupted state → default config flow; if the
+    /// recorded file was deleted → fallback chain (first valid router entry → `zwtcfg.json`).
     ///
-    /// 同时恢复上次使用的语言，优先级：`lang_override`（--lang / ZWT_LANG）>
-    /// 会话记录 `.zwt` > 默认英文。
+    /// Also restores the last-used language. Precedence: `lang_override` (`--lang`/`ZWT_LANG`) >
+    /// session record `.zwt` > English default.
     fn restore_session(&mut self, lang_override: Option<Lang>) {
         let Some(state) = session::load_from(&self.session_path) else {
             self.load_default_config();
             return;
         };
-        // 语言：显式运行时覆盖优先；否则恢复会话中上次的选择
+        // Language: an explicit runtime override wins; otherwise restore the session's choice.
         if lang_override.is_none() {
             if let Some(l) = state.language {
                 Lang::set(l);
@@ -249,9 +265,10 @@ impl App {
         self.restore_with_state(state);
     }
 
-    /// 按给定会话状态恢复（核心恢复逻辑，测试注入状态）。
+    /// Restore from a given session state (the core restore logic; tests inject the state).
     fn restore_with_state(&mut self, state: session::SessionState) {
-        // 1. 自动重载上次路由表（yaml 缺失/损坏则跳过，仅报状态）
+        // 1. Auto-reload the last router table (skip with a status message if the YAML is
+        //    missing/corrupt).
         if let Some(rp) = &state.last_router {
             let rp = PathBuf::from(rp);
             if rp.exists() {
@@ -267,7 +284,7 @@ impl App {
                 }
             }
         }
-        // 2. 应用当前配置（优先级：上次配置 → 路由第一有效 → 默认流程）
+        // 2. Apply the current config (precedence: last config → first valid router → default).
         let applied = if let Some(cp) = &state.last_config {
             let cp = PathBuf::from(cp);
             if cp.exists() {
@@ -290,7 +307,8 @@ impl App {
                 self.load_default_config();
             }
         }
-        // 3. 路由高亮与激活配置对齐；否则恢复记录下标（越界/无效回退第一有效）
+        // 3. Align router highlight with the active config; else recover the recorded index
+        //    (fall back to the first valid one if out of bounds / invalid).
         if !self.router_files.is_empty() {
             if let Some(cp) = self.config_source.as_ref() {
                 if let Some(idx) = self.router_files.iter().position(|e| {
@@ -310,11 +328,12 @@ impl App {
                 self.router_files.iter().position(|e| e.valid).unwrap_or(0)
             };
         }
-        // 4. 持久化恢复后的状态（幂等）
+        // 4. Persist the restored state (idempotent).
         self.save_session();
     }
 
-    /// 默认配置流程：zwtcfg.json 存在则加载，否则基于当前配置生成。
+    /// Default config flow: load `zwtcfg.json` if present, otherwise generate one from the
+    /// current in-memory config.
     fn load_default_config(&mut self) {
         let default_path = Path::new("zwtcfg.json");
         if default_path.exists() {
@@ -331,7 +350,8 @@ impl App {
                         ),
                         kind: MsgKind::Ok,
                     });
-                    // 加载不写盘（磁盘仅在编辑确认时写入），引擎同步由 new() 末尾统一完成
+                    // Loading doesn't write to disk (disk is only written on edit-confirm);
+                    // engine sync is done once at the end of `new()`.
                 }
                 Err(e) => {
                     self.status = Some(StatusMsg {
@@ -347,7 +367,8 @@ impl App {
         } else {
             match config::save_to_path(&self.cfg, default_path) {
                 Ok(()) => {
-                    // 生成的默认配置即当前配置源（热保存写入、热读取监控的对象）
+                    // The generated default config becomes the current source (hot-save target
+                    // and hot-read watch subject).
                     self.config_source = Some(default_path.to_path_buf());
                     self.note_config_source();
                     self.status = Some(StatusMsg {
@@ -373,8 +394,9 @@ impl App {
         }
     }
 
-    /// 持久化会话状态到状态文件：记录当前配置源、路由 yaml 与路由位置。
-    /// 失败仅设状态消息，不阻断流程。
+    /// Persist the session state to the state file: records the current config source, router
+    /// YAML, and router position. On failure only a status message is set; the flow is not
+    /// blocked.
     fn save_session(&mut self) {
         let state = session::SessionState {
             last_config: self
@@ -398,8 +420,9 @@ impl App {
     }
 
     fn handle_event(&mut self, ev: Event) -> Option<DialogKind> {
-        // Windows 下每次按键会产生 Press/Release 两次事件（按住还有 Repeat），
-        // 只处理 Press，避免一次按键触发两次操作、以及双击 Esc 失效。
+        // On Windows each key produces a Press and Release (and a Repeat while held); we only
+        // handle Press so a single tap doesn't trigger the action twice and double-Esc still
+        // quits.
         if let Event::Key(k) = &ev {
             if k.kind != KeyEventKind::Press {
                 return None;
@@ -408,8 +431,8 @@ impl App {
         match self.mode.clone() {
             Mode::Capture { field } => self.handle_capture(field, ev),
             Mode::Edit { field, buf } => self.handle_edit(field, buf, ev),
-            // 执行顺序集合编辑的键盘输入改由全局监听线程经 CaptureKey 转发（rdev），
-            // 此处忽略 crossterm 键盘，避免终端快速输入卡键
+            // Order-set editing is driven by the global listener thread via `CaptureKey`
+            // (rdev); ignore crossterm keyboard here to avoid key-stuck on fast terminal input.
             Mode::OrderEdit { .. } => None,
             Mode::Normal => self.handle_normal(ev),
         }
@@ -417,8 +440,9 @@ impl App {
 
     fn handle_capture(&mut self, field: usize, ev: Event) -> Option<DialogKind> {
         match ev {
-            // 键盘绑定（含 Alt、Esc 取消）全部由全局监听线程经 CaptureKey 转发，
-            // 这里忽略 crossterm 键盘事件，避免 Alt 在终端被误读为 Esc 导致取消。
+            // Key bindings (incl. Alt, Esc-cancel) are all forwarded by the global listener
+            // thread via `CaptureKey`; crossterm key events are ignored here so Alt isn't
+            // misread as Esc (which would cancel capture).
             Event::Key(_) => {}
             Event::Mouse(m) => {
                 if let MouseEventKind::Down(btn) = m.kind {
@@ -430,7 +454,7 @@ impl App {
         None
     }
 
-    /// 统一绑定入口：唯一化检查 → 设置 → 退出捕获 → 自动保存。
+    /// Unified bind entry point: uniqueness check → set → exit capture → auto-save.
     fn bind(&mut self, field: usize, name: String) {
         if let Some(dup) = self.find_binding_conflict(field, &name) {
             self.status = Some(StatusMsg {
@@ -442,7 +466,7 @@ impl App {
                 ),
                 kind: MsgKind::Err,
             });
-            return; // 留在捕获模式，可重新按其他键
+            return; // stay in capture mode so the user can press a different key
         }
         self.set_binding(field, name);
         self.mode = Mode::Normal;
@@ -453,7 +477,8 @@ impl App {
         self.auto_save();
     }
 
-    /// 检查 name 是否已被其他绑定字段使用，返回冲突字段的显示名。
+    /// Check whether `name` is already used by another binding field; return the display name
+    /// of the conflicting field.
     fn find_binding_conflict(&self, field: usize, name: &str) -> Option<&'static str> {
         let bindings: [(&'static str, usize, &str); 5] = [
             (
@@ -488,8 +513,9 @@ impl App {
             .map(|(label, _, _)| label)
     }
 
-    /// 执行顺序集合编辑（rdev 全局按键驱动，避免终端快速输入卡键）。
-    /// 只接受 A/B/C，最多三位且不重复；重复/超限给提示，Esc 取消，Enter 确认。
+    /// Edit the execution-order set (driven by rdev global keys to avoid key-stuck on fast
+    /// terminal input). Only accepts A/B/C, up to three letters, no repeats; a repeat/over-limit
+    /// prompts, Esc cancels, Enter confirms.
     fn order_edit_key(&mut self, field: usize, k: rdev::Key) {
         let buf = match &self.mode {
             Mode::OrderEdit { buf, .. } => buf.clone(),
@@ -531,7 +557,7 @@ impl App {
                     rdev::Key::KeyB => 'B',
                     _ => 'C',
                 };
-                // 集合唯一性：超过三位或元素已存在时静默忽略
+                // Set uniqueness: silently ignore if it would exceed 3 chars or is already present
                 if buf.len() < 3 && !buf.contains(up) {
                     let mut buf = buf;
                     buf.push(up);
@@ -553,10 +579,11 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let v = buf.parse::<u64>().unwrap_or(0);
-                    // FIX: 防止 shoot_interval / switch_interval 被设为 0。
-                    // interval=0 会使引擎 run_loop 进入 200ms 忙等重试死循环，
-                    // 并在 jitter() 中产生 0ms 间隔触发 busy-loop 烧 CPU。
-                    // 偏移字段（offset）允许为 0（表示无随机偏移），只拦截主 interval 字段。
+                    // FIX: prevent `shoot_interval` / `switch_interval` from being set to 0.
+                    // A zero interval sends the engine's `run_loop` into a 200 ms busy-retry
+                    // spin and makes `jitter()` produce a 0 ms interval → CPU-burning busy-loop.
+                    // Offset fields may be 0 (meaning "no jitter"); only the main interval field
+                    // is clamped.
                     let is_interval = matches!(field, F_SWITCH | F_SHOOT);
                     if is_interval && v == 0 {
                         self.status = Some(StatusMsg {
@@ -622,7 +649,7 @@ impl App {
                 None
             }
             F_ORDER => {
-                // 乱序执行下也可编辑集合（选哪些元素参与乱序）
+                // The set is also editable under random order (choose which elements shuffle).
                 self.mode = Mode::OrderEdit {
                     field: F_ORDER,
                     buf: self.cfg.execution_order.clone(),
@@ -630,7 +657,7 @@ impl App {
                 None
             }
             F_MODE => {
-                // 执行方式：长按 ↔ 切换
+                // Execution mode: Hold ↔ Toggle.
                 self.cfg.execution_mode = match self.cfg.execution_mode {
                     ExecutionMode::Hold => ExecutionMode::Toggle,
                     ExecutionMode::Toggle => ExecutionMode::Hold,
@@ -680,8 +707,9 @@ impl App {
         }
     }
 
-    /// 切换界面语言（中文 ↔ 英文），并把选择持久化到会话文件 `.zwt`。
-    /// 状态文案用**切换后的新语言**显示，避免旧语言下滞留。
+    /// Switch the UI language (Chinese ↔ English) and persist the choice to the session file
+    /// `.zwt`. The status message is shown in the **new** language, so it doesn't linger in the
+    /// old one.
     fn switch_language(&mut self) {
         let new = Lang::toggle();
         let text = match new {
@@ -718,13 +746,15 @@ impl App {
             .unwrap_or_else(|| row[row.len() - 1]);
     }
 
-    /// 仅同步引擎线程的配置副本（不写盘）。加载/速切/刷新/热读取等非编辑操作使用，
-    /// 避免覆盖用户手动配置的 zwtcfg.json —— 磁盘只在编辑确认时写入。
+    /// Sync only the engine thread's config copy (no disk write). Used by non-edit operations
+    /// like load / quick-switch / hot-read, so it never overwrites the user's manually-configured
+    /// `zwtcfg.json` — the disk is only written on edit-confirm.
     fn sync_engine(&mut self) {
         *self.shared.lock().unwrap() = self.cfg.clone();
     }
 
-    /// 记录当前配置源文件的修改时间（供热读取对比外部修改）；文件不可读时清空。
+    /// Record the config source's mtime (for hot-read to compare external edits); cleared if the
+    /// file is unreadable.
     fn touch_config_mtime(&mut self) {
         self.config_mtime = self
             .config_source
@@ -733,16 +763,17 @@ impl App {
             .and_then(|m| m.modified().ok());
     }
 
-    /// 把当前 `config_source` 同步给监听守护线程。
-    /// 每次 `config_source` 变化后都要调用（加载/速切/热读取成功等），让监听线程跟踪最新文件。
+    /// Publish the current `config_source` to the watcher daemon thread. Must be called after
+    /// every `config_source` change (load / quick-switch / hot-read success, etc.) so the
+    /// watcher follows the latest file.
     fn note_config_source(&mut self) {
         *self.watched_path.lock().unwrap() = self.config_source.clone();
     }
 
-    /// 热保存：用户确认编辑（Enter）后，保存一次到**当前使用的配置文件**（config_source；
-    /// 未载入任何文件时写 zwtcfg.json），并同步给引擎线程。
-    /// 绑定、执行方式/乱序切换、执行集合确认、数字编辑确认都会调用；
-    /// 取消（Esc）不保存。
+    /// Hot-save: after the user confirms an edit (Enter), save once to the **config file in
+    /// use** (`config_source`; `zwtcfg.json` if none was loaded) and sync to the engine thread.
+    /// Called by binding, mode/random toggles, order-set confirm, and numeric edit confirm;
+    /// cancel (Esc) does not save.
     fn auto_save(&mut self) {
         let path = self
             .config_source
@@ -758,14 +789,16 @@ impl App {
         self.sync_engine();
     }
 
-    /// 热读取：轮询检测当前配置源文件是否被外部修改（mtime 变化），是则自动重新加载并同步引擎。
-    /// 仅在文件可读且解析/校验成功时应用；失败或文件被删除时保持当前配置不覆盖。
+    /// Hot-read: detect whether the current config source was modified externally (mtime
+    /// changed); if so, reload it and sync the engine. Applied only when the file is readable and
+    /// parses/validates; on failure or when the file is deleted, the current config is kept (not
+    /// overwritten).
     fn hot_read(&mut self) {
         let Some(src) = self.config_source.clone() else { return };
         let mtime = match fs::metadata(&src).and_then(|m| m.modified()) {
             Ok(t) => t,
             Err(_) => {
-                // 文件被删除：保持当前配置，提示一次
+                // File deleted: keep the current config, notify once.
                 if self.config_mtime.is_some() {
                     self.status = Some(StatusMsg {
                         text: tfmt!(
@@ -781,7 +814,7 @@ impl App {
             }
         };
         if Some(mtime) == self.config_mtime {
-            return; // 未变化
+            return; // unchanged
         }
         match config::load_from_path(&src) {
             Ok(cfg) => {
@@ -800,7 +833,7 @@ impl App {
                 });
             }
             Err(e) => {
-                // 外部写入中途 / 内容损坏：不覆盖当前配置，下次轮询再试
+                // External write mid-flight / content corrupt: don't overwrite; retry next poll.
                 self.status = Some(StatusMsg {
                     text: tfmt!(
                         "热读取失败（保持当前配置，稍后重试）: {}",
@@ -814,7 +847,8 @@ impl App {
     }
 
     fn export_config_dialog(&mut self) {
-        // 默认文件名 = 当前配置来源文件名；无来源时退回 zwtcfg.json，用户可任意改名
+        // Default filename = the current config source's file name; fall back to zwtcfg.json when
+        // there's no source. The user may rename it.
         let default_name = self
             .config_source
             .as_ref()
@@ -843,7 +877,7 @@ impl App {
     }
 
     fn load_config_dialog(&mut self) {
-        // 不限制文件名/扩展名，任意配置文件可读
+        // No filename/extension restriction: any readable config file is allowed.
         let file = rfd::FileDialog::new()
             .set_title(tr("读取配置", "Load Config"))
             .pick_file();
@@ -869,9 +903,9 @@ impl App {
         }
     }
 
-    /// 加载指定 JSON 配置并应用：更新 cfg/来源，同步引擎行为。
-    /// 只同步不写盘 —— 磁盘保存仅在编辑确认时发生（见 auto_save）。
-    /// 失败返回 Err(具体原因) 且不改变当前配置。
+    /// Load and apply a given JSON config: update `cfg`/source and sync engine behavior.
+    /// Only syncs, never writes to disk — the disk is written only on edit-confirm (see
+    /// `auto_save`). On failure returns `Err(reason)` and leaves the current config untouched.
     fn apply_config_path(&mut self, path: &Path) -> Result<(), String> {
         let cfg = config::load_from_path(path)?;
         self.cfg = cfg;
@@ -883,9 +917,10 @@ impl App {
         Ok(())
     }
 
-    /// 载入指定路由 yaml：解析 → 逐条校验 → 写入无效标记注释 → 填 router_files/router_path，
-    /// 并自动加载第一个有效配置。返回 Err(原因) 表示整体载入失败（读失败/语法或规范错误），
-    /// 此时不改变现有路由。
+    /// Load a given router YAML: parse → validate each entry → write invalid-marker comments →
+    /// populate `router_files`/`router_path`, and auto-load the first valid config. Returns
+    /// `Err(reason)` for a whole-load failure (read failure / syntax or spec error), in which
+    /// case the existing router is left unchanged.
     fn load_router_path(&mut self, path: &Path) -> Result<(), String> {
         let text = fs::read_to_string(path)
             .map_err(|e| tfmt!("读取路由文件失败: {}", "Failed to read router file: {}", e))?;
@@ -907,14 +942,16 @@ impl App {
             }
             entries.push(RouterEntry { path: p, valid, error });
         }
-        // 无效条目：在 yaml 对应位置写入标记注释（同时清除旧标记，避免堆积）
+        // Invalid entries: write a marker comment at the matching position in the YAML (also
+        // clearing stale markers to avoid accumulation).
         if !invalid.is_empty() {
             let rewritten = router::rewrite_with_markers(&text, &invalid);
             fs::write(path, rewritten).map_err(|e| tfmt!("写入无效标记注释失败: {}", "Failed to write invalid marker comment: {}", e))?;
         }
         self.router_files = entries;
         self.router_path = Some(path.to_path_buf());
-        // 自动加载第一个有效配置；失败仅报状态不阻断（路由本身已载入）
+        // Auto-load the first valid config; failure only sets a status, doesn't block (the
+        // router itself is already loaded).
         if let Some(first_valid) = self.router_files.iter().position(|e| e.valid) {
             self.router_index = first_valid;
             let p = self.router_files[first_valid].path.clone();
@@ -934,7 +971,7 @@ impl App {
         Ok(())
     }
 
-    /// 载入速切路由对话框：选取 zwtcfg_router.yaml 后走 load_router_path。
+    /// Quick-switch router dialog: pick `zwtcfg_router.yaml` then go through `load_router_path`.
     fn load_router_dialog(&mut self) {
         let file = rfd::FileDialog::new()
             .set_title(tr("载入路由配置", "Load Router Config"))
@@ -971,8 +1008,9 @@ impl App {
         }
     }
 
-    /// 速切到下一个有效路由配置（按列表顺序循环）。
-    /// 逐个跳过无效条目；文件在载入后被删除/损坏也实时重新校验并跳过。
+    /// Quick-switch to the next valid router config (cycling the list in order).
+    /// Skips invalid entries one by one; a file deleted/corrupted after load is re-validated on
+    /// the fly and skipped too.
     fn router_next(&mut self) {
         if self.router_files.is_empty() {
             self.status = Some(StatusMsg {
@@ -1016,7 +1054,7 @@ impl App {
                     return;
                 }
                 Err(e) => {
-                    // 无效：跳过（标红；若载入前有效则更新为无效状态）
+                    // Invalid: skip (marked red; if it was valid before, update it to invalid).
                     self.router_files[idx].valid = false;
                     self.router_files[idx].error = e;
                 }
@@ -1052,7 +1090,7 @@ impl App {
         let _ = enable_raw_mode();
     }
 
-    // ---- 字段取值/赋值 ----
+    // ---- Field get/set ----
 
     fn set_binding(&mut self, field: usize, name: String) {
         match field {
@@ -1158,7 +1196,8 @@ impl App {
             A_EXPORT => (tr("导出配置", "Export Config"), String::new(), FieldKind::Action),
             A_LOAD => (tr("读取配置", "Load Config"), String::new(), FieldKind::Action),
             A_ROUTER => (tr("载入路由", "Load Router"), String::new(), FieldKind::Action),
-            // 语言切换：显示「对侧」语言（当前中文 → Switch Language，当前英文 → 语言切换）
+            // Language switch: shows the *opposite* language (Chinese UI → `Switch Language`,
+            // English UI → `语言切换`).
             A_LANG => (tr("Switch Language", "语言切换"), String::new(), FieldKind::Action),
             _ => unreachable!(),
         }
@@ -1209,7 +1248,7 @@ impl App {
                         value = format!("{buf}▌");
                     }
                 }
-                // 偏移区间字段自动加 ± 前缀，编辑时只需输数字
+                // Offset fields get a ± prefix automatically, so editing only needs the number.
                 if is_offset_field(fi) {
                     value = format!("±{value}");
                 }
@@ -1230,13 +1269,13 @@ impl App {
     }
 }
 
-/// 是否为偏移区间字段（展示自动加 ± 前缀）。
+/// Whether a field is an offset-range field (displayed with an automatic ± prefix).
 fn is_offset_field(fi: usize) -> bool {
     matches!(fi, F_SWITCH_OFF | F_SHOOT_OFF)
 }
 
-/// 校验路由条目：文件必须存在且可解析为合法配置。
-/// 返回空串表示有效；否则返回供展示 / 写入标记注释的错误原因。
+/// Validate a router entry: the file must exist and parse as a valid config.
+/// Empty string means valid; otherwise returns the reason for display / marker comment.
 fn validate_router_entry(path: &Path) -> String {
     if !path.exists() {
         return tr("文件不存在", "File does not exist").into();
@@ -1247,8 +1286,8 @@ fn validate_router_entry(path: &Path) -> String {
     }
 }
 
-/// 校验执行顺序：1~3 个字符，只能由 A/B/C 组成，每个最多一次。
-/// A / AB / ABC 表示单武器、双武器轮换、三武器循环。
+/// Validate an execution order: 1–3 chars, each one of A/B/C, each at most once.
+/// `A`/`AB`/`ABC` mean single weapon, two-weapon rotation, and three-weapon cycle.
 fn is_valid_order(s: &str) -> bool {
     if s.is_empty() || s.len() > 3 {
         return false;
@@ -1277,7 +1316,7 @@ fn mouse_button_name(btn: MouseButton) -> String {
     }
 }
 
-/// 把若干行字段渲染成 Line 列表。
+/// Render several rows of fields into a `Line` list.
 fn rows_to_lines(rows: &[&[usize]], app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for row in rows {
@@ -1297,16 +1336,16 @@ fn rows_to_lines(rows: &[&[usize]], app: &App) -> Vec<Line<'static>> {
 fn ui(f: &mut Frame, app: &App) {
     let area = f.area();
     let chunks = Layout::vertical([
-        Constraint::Length(9), // banner (6行art + 1行仓库URL + 上下边框)
-        Constraint::Length(5), // 按键绑定 (2 行)
-        Constraint::Length(5), // 执行顺序
-        Constraint::Length(6), // 时间配置 (2 行 + 说明)
-        Constraint::Length(3), // 操作
-        Constraint::Min(3),    // 帮助/状态（操作提示 + 状态与配置文件）
+        Constraint::Length(9), // banner (6 rows art + 1 repo URL + top/bottom borders)
+        Constraint::Length(5), // key bindings (2 rows)
+        Constraint::Length(5), // execution order
+        Constraint::Length(6), // timing config (2 rows + note)
+        Constraint::Length(3), // operations
+        Constraint::Min(3),    // help/status (operation hint + status & config file)
     ])
         .split(area);
 
-    // 标题横幅：绿→蓝平滑渐变 art（不折行）+ 紧贴的 GitHub 仓库地址行
+    // Title banner: smooth green→blue gradient art (no wrap) + the GitHub repo URL line below.
     const GRADIENT: [Color; 6] = [
         Color::Green,
         Color::Green,
@@ -1326,7 +1365,7 @@ fn ui(f: &mut Frame, app: &App) {
         chunks[0],
     );
 
-    // 按键绑定
+    // Key bindings.
     f.render_widget(
         Paragraph::new(rows_to_lines(&ROWS[0..2], app)).block(Block::bordered().title(
             tr(" 按键绑定 ", " Key Bindings "),
@@ -1334,7 +1373,7 @@ fn ui(f: &mut Frame, app: &App) {
         chunks[1],
     );
 
-    // 执行顺序集合
+    // Execution order set.
     let mut order_lines = rows_to_lines(&ROWS[2..3], app);
     order_lines.push(Line::styled(
         tr(
@@ -1343,7 +1382,8 @@ fn ui(f: &mut Frame, app: &App) {
         ),
         Style::default().fg(Color::DarkGray),
     ));
-    // 选中执行顺序集合时，按当前模式显示对应警告；选中执行方式时显示模式说明
+    // When the order set is focused, show a per-mode warning; when the mode field is focused,
+    // show that mode's description.
     if app.is_active(F_ORDER) {
         let warn = if app.cfg.random_execution {
             tr(
@@ -1387,7 +1427,7 @@ fn ui(f: &mut Frame, app: &App) {
         chunks[2],
     );
 
-    // 时间配置
+    // Timing config.
     let mut cfg_lines = rows_to_lines(&ROWS[3..5], app);
     cfg_lines.push(Line::styled(
         tr(
@@ -1403,7 +1443,7 @@ fn ui(f: &mut Frame, app: &App) {
         chunks[3],
     );
 
-    // 操作
+    // Operations.
     f.render_widget(
         Paragraph::new(rows_to_lines(&ROWS[5..6], app)).block(Block::bordered().title(
             tr(" 操作 ", " Operations "),
@@ -1411,7 +1451,7 @@ fn ui(f: &mut Frame, app: &App) {
         chunks[4],
     );
 
-    // 帮助/状态
+    // Help / status.
     let mut help: Vec<Line> = Vec::new();
     help.push(Line::styled(
         tr(
@@ -1420,7 +1460,8 @@ fn ui(f: &mut Frame, app: &App) {
         ),
         Style::default().fg(Color::DarkGray),
     ));
-    // 引擎状态 + 当前配置文件同行展示；已载入路由表时列出全部配置并高亮当前
+    // Engine state + current config file on the same line; when a router table is loaded, list
+    // all configs and highlight the active one.
     let running = app.engine.running();
     let dim = Style::default().fg(Color::DarkGray);
     let hi = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
@@ -1453,7 +1494,7 @@ fn ui(f: &mut Frame, app: &App) {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| entry.path.display().to_string());
-            // 无效条目标红；有效条目中当前使用的高亮，其余暗色
+            // Invalid entries red; of the valid ones the active is highlighted, the rest dimmed.
             let style = if !entry.valid {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else if i == app.router_index {
@@ -1470,7 +1511,7 @@ fn ui(f: &mut Frame, app: &App) {
 
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
-        // 同步交互模式标志给全局监听线程（捕获/编辑中不触发引擎）
+        // Publish the interaction flag to the global listener (capture/edit blocks the engine).
         app.interacting.store(app.mode != Mode::Normal, Ordering::Relaxed);
 
         terminal.draw(|f| ui(f, app))?;
@@ -1488,7 +1529,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 terminal.clear()?;
             }
         }
-        // 配置监听守护线程发现文件被外部改写 → 热重载（轮询已移至 watcher 线程，不在主循环做）
+        // Config watcher daemon noticed an external rewrite → hot-reload (polling moved to the
+        // watcher thread, no longer done in the main loop).
         while let Ok(msg) = app.msg_rx.try_recv() {
             match msg {
                 EngineMsg::Toggled(on) => {
@@ -1512,7 +1554,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                     app.hot_read();
                 }
                 EngineMsg::CaptureKey(k) => {
-                    // 捕获模式 / 执行顺序集合编辑 都由全局转发的按键驱动（rdev，含 Alt）
+                    // Both capture mode and order-set editing are driven by globally-forwarded
+                    // keys (rdev, incl. Alt).
                     let target = match &app.mode {
                         Mode::Capture { field } => Some((*field, true)),
                         Mode::OrderEdit { field, .. } => Some((*field, false)),
@@ -1567,8 +1610,8 @@ mod ui_tests {
     use ratatui::backend::TestBackend;
 
     fn test_app() -> App {
-        // UI 测试断言中文文案：用线程本地覆盖固定语言为中文，
-        // 避免与其它并行测试的全局语言切换相互干扰。
+        // UI tests assert Chinese strings, so pin the language to Chinese via a thread-local
+        // override — this avoids interference from other parallel tests' global-language switches.
         Lang::test_set(Lang::Zh);
         let shared = Arc::new(Mutex::new(Config::default()));
         let (_tx, msg_rx) = mpsc::channel();
@@ -1592,7 +1635,7 @@ mod ui_tests {
         }
     }
 
-    /// 构造一个「有效」的路由条目（测试辅助）。
+    /// Build a "valid" router entry (test helper).
     fn entry(name: &str) -> RouterEntry {
         RouterEntry {
             path: PathBuf::from(name),
@@ -1619,7 +1662,8 @@ mod ui_tests {
         )
     }
 
-    /// 把 buffer 按行收集成字符串。宽字符（CJK）占 2 格、延续格是空格，跳过以免 CJK 间插入空格。
+    /// Collect the buffer into per-line strings. Wide chars (CJK) take 2 columns and their
+    /// continuation cell is a space; they're skipped so CJK doesn't get a space inserted between.
     fn buffer_rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
         let (w, h) = (buf.area.width as usize, buf.area.height as usize);
         (0..h)
@@ -1656,29 +1700,30 @@ mod ui_tests {
 
         let rows = buffer_rows(terminal.backend().buffer());
         let text = rows.join("\n");
-        assert!(text.contains(TOP_BAR), "开源仓库地址未渲染");
-        // 苦力怕已取消，配置区正常
-        assert!(!text.contains('▄'), "Creeper 未移除");
-        assert!(text.contains("武器槽#1绑定"), "配置区未渲染");
+        assert!(text.contains(TOP_BAR), "open-source repo URL not rendered");
+        // Creeper is gone; the config area renders normally.
+        assert!(!text.contains('▄'), "Creeper not removed");
+        assert!(text.contains("武器槽#1绑定"), "config area not rendered");
     }
 
-    /// 状态行：无路由时显示当前配置文件；已载入路由时列出全部并保留当前项。
+    /// Status line: without a router it shows the current config file; with a router it lists
+    /// all configs and keeps the active one.
     #[test]
     fn status_line_shows_config_and_router() {
         let backend = TestBackend::new(120, 36);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = test_app();
 
-        // 未载入路由：显示当前配置文件
+        // No router: shows the current config file.
         app.config_source = Some(PathBuf::from("zwtcfg.json"));
         terminal.draw(|f| ui(f, &app)).unwrap();
         let text = buffer_rows(terminal.backend().buffer()).join("\n");
         assert!(
             text.contains("○ 已停止 | 配置文件: zwtcfg.json"),
-            "单配置未显示: {text}"
+            "single config not shown: {text}"
         );
 
-        // 已载入路由：列出全部配置
+        // Router loaded: lists all configs.
         app.router_files = vec![
             entry("first.json"),
             entry("second.json"),
@@ -1696,7 +1741,7 @@ mod ui_tests {
         );
     }
 
-    /// 速切配置热键与载入路由动作渲染。
+    /// The quick-switch hotkey and the load-router action are rendered.
     #[test]
     fn router_field_and_action_render() {
         let backend = TestBackend::new(120, 36);
@@ -1704,17 +1749,17 @@ mod ui_tests {
         let mut app = test_app();
         terminal.draw(|f| ui(f, &app)).unwrap();
         let text = buffer_rows(terminal.backend().buffer()).join("\n");
-        assert!(text.contains("速切配置热键: RALT"), "速切热键默认值未渲染: {text}");
-        assert!(text.contains("载入路由"), "载入路由动作未渲染: {text}");
+        assert!(text.contains("速切配置热键: RALT"), "quick-switch default not rendered: {text}");
+        assert!(text.contains("载入路由"), "load-router action not rendered: {text}");
 
-        // 改绑速切热键后显示新按键名
+        // After rebinding the quick-switch hotkey, the new key name is shown.
         app.cfg.router_hotkey = "G".into();
         terminal.draw(|f| ui(f, &app)).unwrap();
         let text = buffer_rows(terminal.backend().buffer()).join("\n");
-        assert!(text.contains("速切配置热键: G"), "绑定未渲染: {text}");
+        assert!(text.contains("速切配置热键: G"), "binding not rendered: {text}");
     }
 
-    /// 无效路由条目标红，有效条目正常渲染。
+    /// An invalid router entry renders red; valid entries render normally.
     #[test]
     fn router_invalid_entry_renders_red() {
         let backend = TestBackend::new(120, 36);
@@ -1732,12 +1777,13 @@ mod ui_tests {
         terminal.draw(|f| ui(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
 
-        // 找到含 "bad.json" 的行，重扫该行定位 'b' 所在 buffer x（跳过 CJK 延续格）
+        // Find the line containing "bad.json", then re-scan it to locate the buffer x of 'b'
+        // (skipping CJK continuation cells).
         let rows = buffer_rows(buf);
         let row = rows
             .iter()
             .position(|r| r.contains("bad.json"))
-            .expect("bad.json 应出现在状态行");
+            .expect("bad.json should appear on the status line");
         let mut text = String::new();
         let mut pos_of_b = None;
         let mut skip_next = false;
@@ -1754,28 +1800,29 @@ mod ui_tests {
             let ch = s.chars().next().unwrap();
             text.push(ch);
             if text.ends_with("bad.json") {
-                pos_of_b = Some(x - 7); // 'b' 之后还有 7 个字符
+                pos_of_b = Some(x - 7); // there are 7 chars after 'b'
             }
             if is_cjk(ch) {
                 skip_next = true;
             }
         }
-        let x = pos_of_b.expect("bad.json 文本未定位");
+        let x = pos_of_b.expect("bad.json text not located");
         assert_eq!(
             buf.cell((x, row as u16)).unwrap().fg,
             Color::Red,
-            "无效条目应渲染为红色"
+            "invalid entry should render red"
         );
     }
 
-    /// 速切跳过无效条目、循环回到有效条目，并实时重校验文件变化。
+    /// Quick-switch skips invalid entries, cycles back to valid ones, and re-validates a file
+    /// that changed since load.
     #[test]
     fn router_next_skips_invalid_and_cycles() {
         use std::fs;
         let dir = std::env::temp_dir().join("zwt_router_test");
         fs::create_dir_all(&dir).unwrap();
         let good1 = dir.join("good1.json");
-        let bad = dir.join("bad.json"); // 不存在
+        let bad = dir.join("bad.json"); // does not exist
         let good2 = dir.join("good2.json");
         fs::write(&good1, r#"{"execution_order":"A","execution_hotkey":"LALT"}"#).unwrap();
         fs::write(&good2, r#"{"execution_order":"B","execution_hotkey":"LALT"}"#).unwrap();
@@ -1799,17 +1846,17 @@ mod ui_tests {
             },
         ];
         app.router_index = 0;
-        app.router_next(); // #1 → 下一个有效：跳过无效的 #2，跳到 #3
-        assert_eq!(app.router_index, 2, "应跳过无效条目");
-        assert_eq!(app.cfg.execution_order, "B", "应加载 #3 的配置");
-        app.router_next(); // 循环回 #1
-        assert_eq!(app.router_index, 0, "应循环回第一个");
+        app.router_next(); // #1 → next valid: skip invalid #2, jump to #3
+        assert_eq!(app.router_index, 2, "should skip invalid entries");
+        assert_eq!(app.cfg.execution_order, "B", "should load #3's config");
+        app.router_next(); // cycle back to #1
+        assert_eq!(app.router_index, 0, "should cycle back to the first");
         assert_eq!(app.cfg.execution_order, "A", "应加载 #1 的配置");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 热读取：外部修改当前配置源文件（mtime 变化）→ 自动重新加载。
+    /// Hot-read: an external edit to the config source file (mtime change) → auto-reload.
     #[test]
     fn hot_read_reloads_external_change() {
         use std::fs;
@@ -1820,21 +1867,22 @@ mod ui_tests {
 
         let mut app = test_app();
         app.config_source = Some(path.clone());
-        app.config_mtime = Some(SystemTime::UNIX_EPOCH); // 模拟"外部已改写"
+        app.config_mtime = Some(SystemTime::UNIX_EPOCH); // simulate "externally rewritten"
         app.hot_read();
-        assert_eq!(app.cfg.execution_order, "A", "热读取应加载外部内容");
-        assert!(app.config_mtime.is_some(), "应记录新 mtime");
+        assert_eq!(app.cfg.execution_order, "A", "hot-read should load external content");
+        assert!(app.config_mtime.is_some(), "should record a new mtime");
 
-        // 再次外部改写 → 再次热读取
+        // Second external rewrite → hot-read again.
         fs::write(&path, r#"{"execution_order":"B","execution_hotkey":"LALT"}"#).unwrap();
-        app.config_mtime = Some(SystemTime::UNIX_EPOCH); // 强制视为已变化
+        app.config_mtime = Some(SystemTime::UNIX_EPOCH); // force "changed"
         app.hot_read();
-        assert_eq!(app.cfg.execution_order, "B", "第二次热读取应更新");
+        assert_eq!(app.cfg.execution_order, "B", "second hot-read should update");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 热读取：mtime 未变化时不重新加载（避免覆盖内存中已偏离磁盘的编辑）。
+    /// Hot-read: when mtime didn't change, don't reload (avoids overwriting an in-memory edit
+    /// that has drifted from the disk).
     #[test]
     fn hot_read_ignores_unchanged_file() {
         use std::fs;
@@ -1846,14 +1894,14 @@ mod ui_tests {
         let mut app = test_app();
         app.config_source = Some(path.clone());
         app.config_mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
-        app.cfg.execution_order = "C".into(); // 内存已偏离磁盘
+        app.cfg.execution_order = "C".into(); // in-memory drifted from disk
         app.hot_read();
-        assert_eq!(app.cfg.execution_order, "C", "mtime 未变不应重载");
+        assert_eq!(app.cfg.execution_order, "C", "unchanged mtime should not reload");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 热读取：外部写入损坏内容时不覆盖当前配置。
+    /// Hot-read: external corrupt content must not overwrite the current config.
     #[test]
     fn hot_read_keeps_current_on_corrupt() {
         use std::fs;
@@ -1865,15 +1913,16 @@ mod ui_tests {
         let mut app = test_app();
         app.config_source = Some(path.clone());
         app.config_mtime = Some(SystemTime::UNIX_EPOCH);
-        app.cfg.execution_order = "ABC".into(); // 内存值
+        app.cfg.execution_order = "ABC".into(); // in-memory value
         fs::write(&path, "{not valid json}").unwrap();
         app.hot_read();
-        assert_eq!(app.cfg.execution_order, "ABC", "损坏文件不应覆盖当前配置");
+        assert_eq!(app.cfg.execution_order, "ABC", "corrupt file should not overwrite");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 热保存：编辑确认后写入「当前使用的配置文件」（config_source），而非固定 zwtcfg.json。
+    /// Hot-save: after an edit-confirm, write to the **config file in use** (`config_source`),
+    /// not a hard-coded `zwtcfg.json`.
     #[test]
     fn auto_save_writes_to_current_source() {
         use std::fs;
@@ -1889,13 +1938,14 @@ mod ui_tests {
         app.auto_save();
 
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("ABC"), "保存目标应是 config_source: {text}");
-        assert!(text.contains("F6"), "保存目标应是 config_source: {text}");
+        assert!(text.contains("ABC"), "save target should be config_source: {text}");
+        assert!(text.contains("F6"), "save target should be config_source: {text}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 执行方式字段渲染：默认「切换」，Enter 切换后显示「长按」，选中时显示对应提示。
+    /// The execution-mode field renders: default `Toggle` (切换), shows `Hold` (长按) after
+    /// toggling, and shows the matching hint when focused.
     #[test]
     fn execution_mode_field_renders_with_hint() {
         let backend = TestBackend::new(120, 36);
@@ -1904,14 +1954,14 @@ mod ui_tests {
         app.focus = F_MODE;
         terminal.draw(|f| ui(f, &app)).unwrap();
         let text = buffer_rows(terminal.backend().buffer()).join("\n");
-        assert!(text.contains("执行方式: 切换"), "默认模式未渲染: {text}");
-        assert!(text.contains("切换模式"), "切换模式提示未渲染: {text}");
+        assert!(text.contains("执行方式: 切换"), "default mode not rendered: {text}");
+        assert!(text.contains("切换模式"), "toggle hint not rendered: {text}");
 
         app.cfg.execution_mode = ExecutionMode::Hold;
         terminal.draw(|f| ui(f, &app)).unwrap();
         let text = buffer_rows(terminal.backend().buffer()).join("\n");
-        assert!(text.contains("执行方式: 长按"), "hold 未渲染: {text}");
-        assert!(text.contains("长按模式"), "长按模式提示未渲染: {text}");
+        assert!(text.contains("执行方式: 长按"), "hold not rendered: {text}");
+        assert!(text.contains("长按模式"), "hold hint not rendered: {text}");
     }
 
     #[test]
@@ -1921,16 +1971,17 @@ mod ui_tests {
         let app = test_app();
         terminal.draw(|f| ui(f, &app)).unwrap();
         let rows = buffer_rows(terminal.backend().buffer());
-        // 第一行 art（去掉左框线）应包含 banner 顶行特征字符串
+        // The first art line (after stripping the left border) should contain the banner's top
+        // row signature string.
         let art_row = rows[1].trim_start_matches('│');
         assert!(
             art_row.contains("_____") && art_row.contains("_____           _"),
-            "banner art 行错: {:?}",
+            "banner art line wrong: {:?}",
             art_row
         );
     }
 
-    /// 载入路由：解析 → 校验 → 应用第一个有效配置，并把会话持久化到状态文件。
+    /// Load router: parse → validate → apply the first valid config, and persist the session.
     #[test]
     fn load_router_path_loads_and_applies_first_valid() {
         use std::fs;
@@ -1944,17 +1995,17 @@ mod ui_tests {
         fs::write(&yaml, "config:\n  - one.json\n  - two.json\n").unwrap();
 
         let mut app = test_app();
-        app.session_path = dir.join("state.json"); // 每测试隔离状态文件，避免并发写同一临时文件
+        app.session_path = dir.join("state.json"); // isolate the state file per test, so parallel tests don't write the same temp file
         app.load_router_path(&yaml).unwrap();
 
         assert_eq!(app.router_path.as_deref(), Some(yaml.as_path()));
         assert_eq!(app.router_files.len(), 2);
-        assert_eq!(app.router_index, 0, "应高亮第一个有效条目");
-        assert_eq!(app.cfg.execution_order, "A", "应自动加载第一个有效配置");
+        assert_eq!(app.router_index, 0, "should highlight the first valid entry");
+        assert_eq!(app.cfg.execution_order, "A", "should auto-load the first valid config");
         assert_eq!(app.config_source.as_deref(), Some(cfg1.as_path()));
 
-        // 会话已持久化：记录路由与当前配置
-        let state = session::load_from(&app.session_path).expect("会话应已写入");
+        // Session persisted: records the router and the current config.
+        let state = session::load_from(&app.session_path).expect("session should be written");
         assert_eq!(state.last_router.as_deref(), Some(yaml.to_str().unwrap()));
         assert_eq!(state.last_config.as_deref(), Some(cfg1.to_str().unwrap()));
         assert_eq!(state.router_index, 0);
@@ -1962,7 +2013,8 @@ mod ui_tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 载入路由：无效条目在 yaml 中写入 `# [无效]` 标记，且仍应用第一个有效配置。
+    /// Load router: invalid entries get a `# [无效]` marker in the YAML, and the first valid
+    /// config is still applied.
     #[test]
     fn load_router_path_writes_invalid_markers() {
         use std::fs;
@@ -1979,38 +2031,40 @@ mod ui_tests {
 
         assert_eq!(app.router_files.len(), 2);
         assert!(app.router_files[0].valid);
-        assert!(!app.router_files[1].valid, "缺失文件应标记为无效");
+        assert!(!app.router_files[1].valid, "missing file should be marked invalid");
         assert_eq!(app.router_index, 0);
 
         let text = fs::read_to_string(&yaml).unwrap();
-        assert!(text.contains("# [无效]"), "应写入无效标记: {text}");
-        assert!(text.contains("missing.json"), "标记应指向缺失文件: {text}");
+        assert!(text.contains("# [无效]"), "should write an invalid marker: {text}");
+        assert!(text.contains("missing.json"), "marker should point at the missing file: {text}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 载入路由：yaml 语法/规范错误 → Err 且不改变现有路由（沿用旧表）。
+    /// Load router: a YAML syntax/spec error → `Err` and the existing router is kept (the old
+    /// table is reused).
     #[test]
     fn load_router_path_spec_error_keeps_old_router() {
         use std::fs;
         let dir = std::env::temp_dir().join("zwt_router_spec_err");
         fs::create_dir_all(&dir).unwrap();
         let yaml = dir.join("router.yaml");
-        fs::write(&yaml, "config: a.json\nconfig: b.json\n").unwrap(); // 重复 config 键
+        fs::write(&yaml, "config: a.json\nconfig: b.json\n").unwrap(); // duplicate config key
 
         let mut app = test_app();
         app.router_files = vec![entry("old.json")];
         app.router_path = Some(PathBuf::from("old.yaml"));
 
         let err = app.load_router_path(&yaml).unwrap_err();
-        assert!(err.contains("重复"), "错误信息应说明原因: {err}");
-        assert_eq!(app.router_files.len(), 1, "规范错误不应改动现有路由");
+        assert!(err.contains("重复"), "error should state the reason: {err}");
+        assert_eq!(app.router_files.len(), 1, "spec error must not modify the old router");
         assert_eq!(app.router_path.as_deref(), Some(Path::new("old.yaml")));
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 会话恢复：重载路由表、恢复上次使用的配置，并把路由高亮对齐到该配置。
+    /// Session restore: reloads the router table, restores the last-used config, and aligns the
+    /// router highlight to that config.
     #[test]
     fn restore_with_state_restores_router_and_config() {
         use std::fs;
@@ -2028,18 +2082,19 @@ mod ui_tests {
         let state = session::SessionState {
             last_config: Some(cfg2.to_str().unwrap().to_string()),
             last_router: Some(yaml.to_str().unwrap().to_string()),
-            router_index: 0, // 记录高亮与配置不一致 → 应按 last_config 对齐
+            router_index: 0, // recorded highlight differs from config → align to last_config
             language: None,
         };
         app.restore_with_state(state);
 
-        assert_eq!(app.router_files.len(), 2, "路由应自动重载");
-        assert_eq!(app.config_source.as_deref(), Some(cfg2.as_path()), "应恢复上次配置");
+        assert_eq!(app.router_files.len(), 2, "router should auto-reload");
+        assert_eq!(app.config_source.as_deref(), Some(cfg2.as_path()), "should restore the last config");
         assert_eq!(app.cfg.execution_order, "B");
-        assert_eq!(app.router_index, 1, "高亮应对齐到恢复的配置");
+        assert_eq!(app.router_index, 1, "highlight should align to the restored config");
     }
 
-    /// 会话恢复：上次配置被删除 → 回退到路由第一有效条目，不崩溃。
+    /// Session restore: when the last config was deleted, fall back to the first valid router
+    /// entry without crashing.
     #[test]
     fn restore_with_state_falls_back_when_config_missing() {
         use std::fs;
@@ -2065,7 +2120,8 @@ mod ui_tests {
         assert_eq!(app.cfg.execution_order, "A");
     }
 
-    /// 启动恢复集成：从会话文件读取状态并自动重载路由/应用配置。
+    /// Startup restore integration: read the state from the session file and auto-reload the
+    /// router / apply the config.
     #[test]
     fn restore_session_reads_state_file() {
         use std::fs;
@@ -2089,33 +2145,35 @@ mod ui_tests {
 
         app.restore_session(None);
 
-        assert_eq!(app.router_files.len(), 1, "启动应自动重载路由");
+        assert_eq!(app.router_files.len(), 1, "startup should auto-reload the router");
         assert_eq!(app.config_source.as_deref(), Some(cfg1.as_path()));
     }
 
-    /// 语言切换项渲染「对侧」语言：当前中文显示 `Switch Language`，当前英文显示 `语言切换`。
+    /// The language-switch entry renders the *opposite* language: current Chinese shows
+    /// `Switch Language`, current English shows `语言切换`.
     #[test]
     fn language_action_renders_cross_lang_label() {
         let backend = TestBackend::new(140, 36);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        // 当前中文 → 按钮显示英文（目标语言）
+        // Current Chinese → button shows English (the target language).
         Lang::test_set(Lang::Zh);
         let app = test_app();
         terminal.draw(|f| ui(f, &app)).unwrap();
         let text = buffer_rows(terminal.backend().buffer()).join("\n");
-        assert!(text.contains("[ Switch Language ]"), "中文下应显示英文目标: {text}");
+        assert!(text.contains("[ Switch Language ]"), "Chinese UI should show the English target: {text}");
 
-        // 当前英文 → 按钮显示中文
+        // Current English → button shows Chinese.
         Lang::test_set(Lang::En);
         terminal.draw(|f| ui(f, &app)).unwrap();
         let text = buffer_rows(terminal.backend().buffer()).join("\n");
-        assert!(text.contains("[ 语言切换 ]"), "英文下应显示中文目标: {text}");
+        assert!(text.contains("[ 语言切换 ]"), "English UI should show the Chinese target: {text}");
 
         Lang::test_clear();
     }
 
-    /// 切换语言后：全局（线程本地）语言被翻转，且把选择持久化到会话文件（`language` 字段更新）。
+    /// After switching, the (thread-local) language is flipped and the choice is persisted to
+    /// the session file (the `language` field is updated).
     #[test]
     fn switch_language_toggles_and_persists() {
         let mut app = test_app();
@@ -2123,18 +2181,18 @@ mod ui_tests {
         std::fs::create_dir_all(&dir).unwrap();
         app.session_path = dir.join("state.json");
 
-        // 由中文切换到英文
+        // Switch from Chinese to English.
         Lang::test_set(Lang::Zh);
         app.switch_language();
-        assert_eq!(Lang::get(), Lang::En, "切换后应为英文");
-        let state = session::load_from(&app.session_path).expect("会话应已写入");
-        assert_eq!(state.language, Some(Lang::En), "会话应记录英文");
+        assert_eq!(Lang::get(), Lang::En, "should switch to English");
+        let state = session::load_from(&app.session_path).expect("session should be written");
+        assert_eq!(state.language, Some(Lang::En), "session should record English");
 
-        // 再切回中文
+        // Switch back to Chinese.
         app.switch_language();
-        assert_eq!(Lang::get(), Lang::Zh, "应能切回中文");
-        let state = session::load_from(&app.session_path).expect("会话应已写入");
-        assert_eq!(state.language, Some(Lang::Zh), "会话应记录中文");
+        assert_eq!(Lang::get(), Lang::Zh, "should switch back to Chinese");
+        let state = session::load_from(&app.session_path).expect("session should be written");
+        assert_eq!(state.language, Some(Lang::Zh), "session should record Chinese");
 
         let _ = std::fs::remove_dir_all(&dir);
         Lang::test_clear();

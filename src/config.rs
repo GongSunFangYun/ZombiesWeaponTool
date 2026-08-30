@@ -1,38 +1,42 @@
-//! 配置模型：`Config` 结构体、JSON 读写与校验。
+//! Config model: the [`Config`] struct plus JSON (de)serialization and validation.
 //!
-//! 字段名即配置文件里的 JSON 键（英文、无单位），由 `serde` 反序列化/序列化，
-//! 带 `#[serde(default)]`，因此**缺字段会回落默认值**（旧配置向后兼容）。
-//! 校验集中在 [`Config::validate`]：拦截 0 间隔（会让引擎忙等死循环）与非法
-//! 执行顺序。加载路径 [`load_from_path`] 会先反序列化再校验，失败返回带原因的
-//! `Err(String)`，供上层展示给用户。
+//! Field names are the JSON keys used in the config file (English, no units). They are
+//! (de)serialized by `serde`, and the struct carries `#[serde(default)]`, so **missing
+//! fields fall back to sensible defaults** — this keeps older config files compatible.
+//! Validation is centralized in [`Config::validate`], which rejects two classes of bad
+//! input: a zero interval (which would spin the engine into a busy-loop) and an invalid
+//! `execution_order`. The [`load_from_path`] entry point deserializes then validates,
+//! returning an `Err(String)` with a human-readable reason that callers can surface.
 //!
-//! 注意：字段键名（如 `weapon_slot_1`）是**配置文件的标识符**，非 UI 文案，
-//! 不参与国际化；只有校验/序列化的错误提示文案走 [`crate::lang`] 翻译。
+//! Note: the JSON **keys** (e.g. `weapon_slot_1`) are config-file identifiers, not UI text,
+//! so they are deliberately **not** localized; only the validation / serialization error
+//! messages are translated via [`crate::lang`].
 
 use crate::lang::tr;
 use crate::tfmt;
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::Path};
 
-/// 执行方式：热键触发引擎运行/停止的模式。
+/// How the execution hotkey toggles the engine.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ExecutionMode {
-    /// 长按：按住执行热键时运行，松开即停止。
+    /// Hold: the engine runs for as long as the hotkey is physically held, stopping on release.
     #[serde(rename = "hold")]
     Hold,
-    /// 切换：点击执行热键开关运行状态。
+    /// Toggle: each press flips the engine's running state.
     #[serde(rename = "toggle")]
     Toggle,
 }
 
 impl Default for ExecutionMode {
-    /// 默认「切换」，与历史行为一致（旧配置文件缺该字段时自动回退到此值）。
+    /// Default to `Toggle` — preserves the historical behavior, and is the value an
+    /// older config file falls back to when the field is absent.
     fn default() -> Self {
         ExecutionMode::Toggle
     }
 }
 
-/// 配置结构体，字段名即 JSON 中的键（英文，无单位）。
+/// The full configuration. Each field is exposed as-is in JSON (key = field's `#[serde(rename)]`).
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Config {
@@ -82,15 +86,18 @@ impl Default for Config {
 }
 
 impl Config {
-    /// 校验配置合法性。
+    /// Validate the config for internal consistency.
     ///
-    /// 检查项：
-    /// - `shoot_interval_ms` 不能为 0（会在 run_loop 中引发无意义的 200ms 忙等重试循环）；
-    /// - `weapon_switch_interval_ms` 不能为 0（同上）；
-    /// - `execution_order` 只能由 A/B/C 各最多一次组成，且长度 1~3
-    ///   （非法字符或重复项在 `build_slots` 中会被静默忽略，但在加载时给出明确错误更友好）。
+    /// Checks (rejected with a descriptive `Err`):
+    /// - `shoot_interval_ms != 0` — a zero value would loop the engine's `run_loop` into a
+    ///   meaningless 200 ms busy-retry spin (see `engine.rs`).
+    /// - `weapon_switch_interval_ms != 0` — same busy-loop hazard as above.
+    /// - `execution_order` is 1–3 chars, each one of `A`/`B`/`C`, with no repeats. Invalid
+    ///   chars or duplicates are silently ignored later inside `build_slots`, but reporting
+    ///   them at load time is much friendlier than a silent misconfiguration.
     ///
-    /// 不对绑定字段做严格校验，因为空绑定是合法的（表示该槽未启用）。
+    /// Binding fields are deliberately left unvalidated, because an *empty* binding is legal
+    /// (it simply means that weapon slot is not used).
     pub fn validate(&self) -> Result<(), String> {
         if self.shoot_interval_ms == 0 {
             return Err(tr(
@@ -106,7 +113,7 @@ impl Config {
             )
             .into());
         }
-        // execution_order：长度 1~3，每个字符只能是 A/B/C，且不重复
+        // execution_order: length 1–3, each char one of A/B/C, no duplicates.
         if self.execution_order.is_empty() || self.execution_order.len() > 3 {
             return Err(tfmt!(
                 "execution_order 长度须在 1~3 之间，当前: {}",
@@ -147,17 +154,17 @@ pub fn save_to_path(cfg: &Config, path: &Path) -> io::Result<()> {
     fs::write(path, json)
 }
 
-/// 从路径加载配置，反序列化后立即执行 `validate()`。
+/// Load a config from a path, deserialize it, then immediately run [`Config::validate`].
 ///
-/// # 校验修复
+/// Why validation matters (bug-fix rationale): the original implementation only parsed the
+/// JSON and never checked the field values, which let three failure modes slip through:
+/// - `shoot_interval_ms = 0` sent the engine thread into a 200 ms busy-retry spin;
+/// - `switch_interval_ms = 0` did the same;
+/// - an `execution_order` with invalid chars or duplicates was silently dropped inside
+///   `build_slots`, so the user got no feedback.
 ///
-/// 原实现仅做 JSON 语法解析，不校验字段值的合法性：
-/// - `shoot_interval_ms = 0` 会导致引擎线程进入 200ms 忙等重试死循环；
-/// - `switch_interval_ms = 0` 同上；
-/// - `execution_order` 含非法字符或重复项会被 `build_slots` 静默忽略，
-///   但用户无法得到明确反馈。
-///
-/// 现在加载失败时返回包含具体原因的 `Err(String)`，调用方可展示给用户。
+/// The current implementation returns an `Err(String)` carrying the specific reason so the
+/// caller can show it to the user instead of silently misbehaving.
 pub fn load_from_path(path: &Path) -> Result<Config, String> {
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let cfg: Config = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -174,21 +181,22 @@ mod tests {
         assert!(Config::default().validate().is_ok());
     }
 
-    /// execution_mode 序列化/反序列化往返一致，且缺字段时回退到 toggle。
+    /// `execution_mode` round-trips through JSON unchanged, and an absent field falls
+    /// back to `toggle` (so older config files stay compatible).
     #[test]
     fn execution_mode_round_trips_and_defaults_to_toggle() {
         let json = serde_json::to_string(&Config::default()).unwrap();
         assert!(json.contains("\"execution_mode\":\"toggle\""), "got: {json}");
         assert!(json.contains("\"router_hotkey\":\"RALT\""), "got: {json}");
 
-        // 显式 hold 可读回
+        // An explicit `hold` value reads back as `Hold`.
         let c: Config = serde_json::from_str(
             "{\"execution_order\":\"AB\",\"execution_mode\":\"hold\"}",
         )
         .unwrap();
         assert_eq!(c.execution_mode, ExecutionMode::Hold);
 
-        // 缺字段 → 回退 toggle（旧配置文件兼容）
+        // A missing field falls back to `toggle` (legacy config compatibility).
         let c: Config = serde_json::from_str("{\"execution_order\":\"ABC\"}").unwrap();
         assert_eq!(c.execution_mode, ExecutionMode::Toggle);
         assert_eq!(c.execution_mode, ExecutionMode::default());

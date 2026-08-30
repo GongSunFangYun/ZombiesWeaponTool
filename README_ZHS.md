@@ -1,21 +1,6 @@
-<div align="center">
-
-<img src="app.ico" alt="Logo" width="160" height="160">
-
 # ZombiesWeaponTool
 
-[English](README.md) | [简体中文](README_ZHS.md)
-
-[![GitHub release](https://img.shields.io/github/v/release/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-[![Downloads](https://img.shields.io/github/downloads/GongSunFangYun/ZombiesWeaponTool/total?style=flat-square)]()
-[![Stars](https://img.shields.io/github/stars/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-[![Forks](https://img.shields.io/github/forks/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-[![Issues](https://img.shields.io/github/issues/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-[![License](https://img.shields.io/github/license/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-
-</div>
-
-ZombiesWeaponTool是一款基于终端（TUI）的全局键鼠自动化工具，主要面向Hypixel Zombies模式及类似玩法的第一人称射击游戏。它通过全局热键触发，激活后按预设配置循环执行宏操作：根据绑定按键自动切枪，同时以精准节奏模拟右键连点。工具基于 Rust 编写，使用 `ratatui`、`crossterm` 构建界面，`rdev` 负责全局输入监听与模拟注入，即使游戏处于前台也能正常工作。
+一款基于终端（TUI）的全局键鼠自动化工具，主要面向Hypixel Zombies模式及类似玩法的第一人称射击游戏。它通过全局热键触发，激活后按预设配置循环执行宏操作：根据绑定按键自动切枪，同时以精准节奏模拟右键连点。工具基于 Rust 编写，使用 `ratatui`、`crossterm` 构建界面，`rdev` 负责全局输入监听与模拟注入，即使游戏处于前台也能正常工作。
 
 ---
 

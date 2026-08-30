@@ -1,21 +1,6 @@
-<div align="center">
-
-<img src="app.ico" alt="Logo" width="160" height="160">
-
 # ZombiesWeaponTool
 
-[English](README.md) | [简体中文](README_ZHS.md)
-
-[![GitHub release](https://img.shields.io/github/v/release/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-[![Downloads](https://img.shields.io/github/downloads/GongSunFangYun/ZombiesWeaponTool/total?style=flat-square)]()
-[![Stars](https://img.shields.io/github/stars/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-[![Forks](https://img.shields.io/github/forks/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-[![Issues](https://img.shields.io/github/issues/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-[![License](https://img.shields.io/github/license/GongSunFangYun/ZombiesWeaponTool?style=flat-square)]()
-
-</div>
-
-ZombiesWeaponTool is a terminal-based (TUI) global keyboard and mouse automation tool for first-person shooters, built with Hypixel Zombies and Black-Ops–style gameplay in mind. It listens for a global execution hotkey and, once activated, runs a configurable macro loop that switches weapons according to your bindings and autoclicks the right mouse button at a precise rhythm. Written in Rust with `ratatui`, `crossterm`, and `rdev` for global input capture and injection, it keeps working even when your game is in the foreground.
+A terminal-based (TUI) global keyboard and mouse automation tool for first-person shooters, built with Hypixel Zombies and Black-Ops–style gameplay in mind. It listens for a global execution hotkey and, once activated, runs a configurable macro loop that switches weapons according to your bindings and autoclicks the right mouse button at a precise rhythm. Written in Rust with `ratatui`, `crossterm`, and `rdev` for global input capture and injection, it keeps working even when your game is in the foreground.
 
 ---
 

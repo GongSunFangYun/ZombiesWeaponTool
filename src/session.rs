@@ -1,9 +1,16 @@
-//! 会话状态持久化：记录上次使用的配置文件、上次载入的路由表与当前路由位置，
-//! 存于用户目录点文件 `~/.zwt`（内容为 JSON），供启动时自动恢复。
+//! Session-state persistence.
 //!
-//! - 缺失 / 损坏 / 不可读 → `load` 返回 None，调用方走全新默认流程，不崩溃；
-//! - 相对路径按原样存储：启动时相对路径按当前工作目录解析，工具整体移动后
-//!   同目录文件仍可命中（绝对的外部路径失效则走调用方的回退链）。
+//! Records the last-used config file, the last-loaded router table, and the current router
+//! position into a small JSON dot-file (`~/.zwt`) in the user's home directory, so the app
+//! can restore its state on the next launch.
+//!
+//! Robustness guarantees:
+//! - Missing / corrupt / unreadable file → `load` returns `None` and the caller starts
+//!   from a fresh default flow instead of crashing.
+//! - Relative paths are stored verbatim. On startup they're resolved against the *current*
+//!   working directory, so moving the whole tool keeps same-directory files findable
+//!   (an absolute external path that no longer exists falls through to the caller's
+//!   fallback chain).
 
 use crate::lang::Lang;
 use crate::tfmt;
@@ -12,24 +19,25 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// 会话状态：下次启动恢复「上次使用」的依据。
+/// Session state: the "last used" record restored on the next launch.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 pub struct SessionState {
-    /// 上次使用的配置文件路径（按原样存储，相对/绝对均可）
+    /// Last-used config file path (stored verbatim; relative or absolute).
     #[serde(default)]
     pub last_config: Option<String>,
-    /// 上次载入的路由 yaml 路径
+    /// Last-loaded router YAML path.
     #[serde(default)]
     pub last_router: Option<String>,
-    /// 当前路由位置（router_files 下标）
+    /// Current router position (index into `router_files`).
     #[serde(default)]
     pub router_index: usize,
-    /// 用户上次选择的语言（`zh` / `en`）。缺失 → 由调用方回退到默认英文。
+    /// User's last language choice (`zh` / `en`). When absent, the caller falls back to
+    /// the default (English).
     #[serde(default)]
     pub language: Option<Lang>,
 }
 
-/// `~/.zwt` 的完整路径：优先 USERPROFILE，回退 HOME，再回退当前目录。
+/// Full path of `~/.zwt`: prefer `USERPROFILE`, fall back to `HOME`, then the cwd.
 pub fn state_path() -> PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -37,13 +45,15 @@ pub fn state_path() -> PathBuf {
     PathBuf::from(home).join(".zwt")
 }
 
-/// 从指定路径读取会话状态（`state_path()` 即默认状态文件）；任何失败返回 None。
+/// Load session state from a path (`state_path()` is the default file).
+/// Any failure (I/O, JSON parse) yields `None` rather than an error, so the caller can
+/// simply start fresh.
 pub fn load_from(path: &Path) -> Option<SessionState> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-/// 写入会话状态到指定路径（覆盖写，先确保父目录存在）。
+/// Write session state to a path (overwrites; ensures the parent directory exists first).
 pub fn save_to(path: &Path, state: &SessionState) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {

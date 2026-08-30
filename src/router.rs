@@ -1,23 +1,26 @@
-//! YAML 配置路由：`zwtcfg_router.yaml` 引用多个 JSON 配置文件路径，
-//! 供「速切配置」快捷键按列表顺序循环加载。
+//! YAML configuration router.
 //!
-//! 该路由文件是固定 schema（`config:` 下的字符串列表），用轻量解析器覆盖，
-//! 不引入完整 YAML 依赖。解析同时记录每个条目的行号，便于校验后
-//! 在无效条目对应位置自动写入标记注释。
+//! `zwtcfg_router.yaml` lists the paths of several JSON config files, and the "quick-switch"
+//! hotkey cycles through them in order.
+//!
+//! The router file has a fixed schema (a list of strings under `config:`), so a tiny
+//! hand-written parser is enough — no full YAML dependency. As it parses, it records each
+//! entry's line number so that, after validation, an invalid entry can be annotated in place
+//! with a marker comment.
 
 use crate::lang::tr;
 use crate::tfmt;
 
-/// 路由条目：配置文件名 + 在原始文本中的 0-based 行号。
+/// A single router entry: config file name + its 0-based line number in the raw text.
 #[derive(Debug)]
 pub struct RouterItem {
     pub name: String,
     pub line: usize,
 }
 
-/// 解析 `zwtcfg_router.yaml` 中 `config` 键下的文件列表。
+/// Parse the file list under the `config:` key of `zwtcfg_router.yaml`.
 ///
-/// 支持三种写法（空行与 `#` 注释一律忽略）：
+/// Supports three forms (blank lines and `#` comments are ignored):
 /// ```yaml
 /// config:
 ///  - first.json
@@ -29,12 +32,13 @@ pub struct RouterItem {
 /// config: first.json
 /// ```
 ///
-/// 结构不符合预期规范时返回 Err（调用方应「忽略载入」）：
-/// - 顶层出现非 `config` 键；
-/// - config 块内出现非列表项；
-/// - 流式列表未闭合（缺少 `]`）；
-/// - 重复的 `config` 键；
-/// - config 文件列表为空。
+/// Returns `Err` when the structure violates the expected schema; the caller should then
+/// simply skip the load. Error cases:
+/// - a top-level key other than `config`;
+/// - a non-list item inside the `config` block;
+/// - an unclosed inline list (missing `]`);
+/// - a duplicate `config` key;
+/// - an empty `config` file list.
 pub fn parse_router_yaml(text: &str) -> Result<Vec<RouterItem>, String> {
     let mut items: Vec<RouterItem> = Vec::new();
     let mut saw_config = false;
@@ -56,7 +60,7 @@ pub fn parse_router_yaml(text: &str) -> Result<Vec<RouterItem>, String> {
             saw_config = true;
             let rest = rest.trim();
             if rest.is_empty() {
-                in_config = true; // 块式：后续 `- item` 行都属于 config
+                in_config = true; // block form: following `- item` lines belong to config
             } else if rest.starts_with('[') {
                 if !rest.ends_with(']') {
                     return Err(tfmt!(
@@ -73,7 +77,7 @@ pub fn parse_router_yaml(text: &str) -> Result<Vec<RouterItem>, String> {
                 }
                 in_config = false;
             } else {
-                // 单值：config: a.json
+                // single value: config: a.json
                 let item = clean(rest);
                 if !item.is_empty() {
                     items.push(RouterItem { name: item, line: idx });
@@ -116,7 +120,7 @@ pub fn parse_router_yaml(text: &str) -> Result<Vec<RouterItem>, String> {
     Ok(items)
 }
 
-/// 去掉首尾空白，并剥掉成对引号（`"..."` 或 `'...'`）。
+/// Strip surrounding whitespace and any matched quotes (`"..."` or `'...'`).
 fn clean(s: &str) -> String {
     let s = s.trim();
     let unquoted = s
@@ -126,18 +130,19 @@ fn clean(s: &str) -> String {
     unquoted.unwrap_or(s).to_string()
 }
 
-/// 基于原始文本重写路由文件：为无效条目在对应行上方写入标记注释，
-/// 同时清除上一轮遗留的 `# [无效]` 标记（避免重复堆积）。
+/// Rewrite the router file from its original text: insert a marker comment above each
+/// invalid entry, while clearing any `# [无效]` markers left over from a previous run so
+/// they don't accumulate.
 ///
-/// `invalid`: (条目所在 0-based 行号, 注释文本)。行号须与 `text` 一致，
-/// 即来自对同一文本的 `parse_router_yaml` 结果。
+/// `invalid` is `(0-based line of the entry, comment text)`. The line numbers must come from
+/// `parse_router_yaml` run on the very same `text`.
 pub fn rewrite_with_markers(text: &str, invalid: &[(usize, String)]) -> String {
     use std::collections::HashMap;
     let map: HashMap<usize, &String> = invalid.iter().map(|(l, c)| (*l, c)).collect();
     let mut out: Vec<String> = Vec::new();
     for (idx, raw) in text.lines().enumerate() {
         if raw.trim().starts_with("# [无效]") {
-            continue; // 清除旧标记，重新按当前校验结果生成
+            continue; // drop stale markers, regenerate from the current validation result
         }
         if let Some(comment) = map.get(&idx) {
             out.push((*comment).clone());
@@ -171,7 +176,7 @@ config:
 ";
         let items = parse_router_yaml(yaml).unwrap();
         assert_eq!(names(&items), vec!["first.json", "second.json", "third.json"]);
-        // 行号（0-based）：first=2, second=3, third=5（中间有空行）
+        // 0-based line numbers: first=2, second=3, third=5 (blank line in between).
         assert_eq!(items[0].line, 2);
         assert_eq!(items[1].line, 3);
         assert_eq!(items[2].line, 5);
@@ -213,7 +218,7 @@ config:
     #[test]
     fn rejects_non_list_item_in_block() {
         let err = parse_router_yaml("config:\n - a.json\nother: 1\n").unwrap_err();
-        assert!(err.contains('3'), "err: {err}"); // 第 3 行（1-based）
+        assert!(err.contains('3'), "err: {err}"); // line 3 (1-based)
     }
 
     #[test]
@@ -237,11 +242,11 @@ config:
             "config:\n - ok.json\n# [无效] bad.json: 文件不存在\n - bad.json\n - ok2.json\n"
         );
 
-        // 再次载入（重新解析后行号右移，bad.json 现在在第 3 行）：不重复堆积
+        // Reload (re-parsing shifts the line number, bad.json is now line 3): no accumulation.
         let again = rewrite_with_markers(&out, &[(3, "# [无效] bad.json: 文件不存在".to_string())]);
         assert_eq!(again, out);
 
-        // 修复后（无标记）：遗留标记被清除
+        // After fixing (no markers): stale markers are cleared.
         let fixed = rewrite_with_markers(&out, &[]);
         assert_eq!(fixed, "config:\n - ok.json\n - bad.json\n - ok2.json\n");
     }
