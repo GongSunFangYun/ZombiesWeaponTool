@@ -17,7 +17,7 @@
 
 一款基于终端（TUI）的全局键鼠自动化工具，主要面向Hypixel Zombies模式及类似玩法的第一人称射击游戏。它通过全局热键触发，激活后按预设配置循环执行宏操作：根据绑定按键自动切枪，同时以精准节奏模拟右键连点。工具基于 Rust 编写，使用 `ratatui`、`crossterm` 构建界面，`rdev` 负责全局输入监听与模拟注入，即使游戏处于前台也能正常工作。
 
-<img width="1243" height="732" alt="IMAGE" src="https://github.com/user-attachments/assets/fea170fc-17ed-4113-a15a-44b88a48f6b2" />
+<img width="1243" height="732" alt="LOAD" src="https://github.com/user-attachments/assets/6fc0f29d-e735-4e31-beab-72b0c7edfa91" />
 
 ---
 
