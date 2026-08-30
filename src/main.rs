@@ -1405,12 +1405,12 @@ fn ui(f: &mut Frame, app: &App) {
     } else if app.is_active(F_MODE) {
         let hint = match app.cfg.execution_mode {
             ExecutionMode::Hold => tr(
-                "长按模式需要持续按住热键才可执行操作",
-                "Hold mode requires you to keep holding the hotkey to run",
+                "[!] 长按执行方式需要持续按住热键才可执行操作",
+                "[!] Hold mode keeps the action running only while the hotkey is pressed",
             ),
             ExecutionMode::Toggle => tr(
-                "切换模式仅需点击热键即可实现启动与停止操作",
-                "Toggle mode only takes a tap of the hotkey to start or stop",
+                "[!] 切换执行方式仅需点击热键即可实现启动与停止操作",
+                "[!] Toggle mode starts or stops the action with a single tap of the hotkey",
             ),
         };
         order_lines.push(Line::styled(
