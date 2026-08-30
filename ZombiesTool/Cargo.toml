@@ -1,0 +1,21 @@
+[package]
+name = "ZombiesWeaponTool"
+version = "1.2.1"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+rfd = "0.17.2"
+rdev = "0.5.3"
+rand = "0.10.2"
+winapi = { version = "0.3", features = ["timeapi"] }
+
+[build-dependencies]
+winres = "0.1.12"
+
+# 本地补丁：去掉 rdev 钩子回调里的 Keyboard::get_name（钩子线程阻塞 → 卡键）
+[patch.crates-io]
+rdev = { path = "vendor/rdev" }
